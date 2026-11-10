@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Attendance System</title>
+<script src="https://unpkg.com/html5-qrcode"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+<style>
+:root{font-family:Arial,sans-serif;color:#172033;background:#f3f6fb}
+*{box-sizing:border-box}body{margin:0}.top{background:#142d4e;color:white;padding:22px;text-align:center}
+.top h1{margin:0 0 7px}.top p{margin:0;color:#dbeafe}.wrap{max-width:1100px;margin:22px auto;padding:0 14px}
+.panel{background:white;border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 3px 14px #102a4312}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}input,select,button{padding:11px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px}
+input,select{background:white;min-width:140px}button{background:#1769aa;color:white;border:0;cursor:pointer}button.secondary{background:#475569}button.danger{background:#b42318}
+button:disabled{opacity:.5}table{border-collapse:collapse;width:100%;margin-top:12px;overflow:auto}th,td{border:1px solid #dbe2ea;padding:9px;text-align:left;font-size:14px}th{background:#eaf1f8}
+.hidden{display:none!important}.muted{color:#64748b}.success{color:#087443}.error{color:#b42318}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.card{background:#f7fafc;border:1px solid #dce5ee;border-radius:10px;padding:13px}.card h3{margin:4px 0}
+#reader{max-width:480px;margin:12px auto}canvas{max-width:100%}.studentqr{display:inline-block;border:1px solid #ddd;padding:10px;margin:8px;border-radius:9px;text-align:center}
+@media(max-width:600px){.panel{padding:12px}th,td{font-size:12px;padding:6px}.row input,.row select{flex:1}}
+</style>
+</head>
+<body>
+<header class="top"><h1>Smart Attendance System</h1><p>National University of Pakistan · BSCS</p></header>
+<main class="wrap">
+<section class="panel" id="loginPanel">
+<h2>Login</h2><p class="muted">Students can view their profile by scanning their QR code. Teachers/Admins must login to mark attendance.</p>
+<div class="row"><select id="role"><option value="teacher">Teacher</option><option value="admin">Admin</option></select>
+<input id="password" type="password" placeholder="Enter password"><button onclick="login()">Login</button></div>
+<p id="loginMsg"></p><p class="muted">Demo passwords: Teacher = TEACHER · Admin = ADMIN</p>
+</section>
+
+<section class="panel hidden" id="staffPanel">
+<div class="row"><h2 id="welcome" style="margin-right:auto">Dashboard</h2><button class="secondary" onclick="logout()">Logout</button></div>
+<div class="cards">
+<div class="card"><h3>Mark attendance</h3><p>Choose lecture, then scan student QR.</p>
+<select id="lecture"><option value="1">Lecture 1</option><option value="2">Lecture 2</option><option value="3">Lecture 3</option><option value="4">Lecture 4</option></select>
+<button onclick="startScanner()">Start QR Scanner</button><button class="secondary" onclick="stopScanner()">Stop</button><div id="reader"></div><p id="scanMsg"></p></div>
+<div class="card"><h3>Current attendance day</h3><p id="today"></p><p class="muted">Day changes at 8:00 AM Pakistan time. Earlier records remain in history.</p>
+<button onclick="loadReport()">Refresh report</button><button class="secondary" onclick="window.print()">Print / Save PDF</button></div>
+</div>
+<div id="adminTools" class="hidden">
+<h3>Student management (Admin only)</h3>
+<div class="row"><input id="roll" placeholder="Roll number"><input id="name" placeholder="Student name"><input id="program" value="BSCS" placeholder="Program"><input id="semester" value="Semester II" placeholder="Semester"><button onclick="addStudent()">Add student</button></div>
+<p id="studentMsg"></p>
+</div>
+<h3>Daily attendance report</h3><div class="row"><input id="reportDate" type="date"><button onclick="loadReport()">Load report</button><button class="secondary" onclick="downloadCSV()">Download CSV</button></div>
+<div id="report"></div>
+<h3>Student QR codes</h3><div id="qrList" class="row"></div>
+<h3>Attendance history</h3><button class="secondary" onclick="loadHistory()">Load history</button><div id="history"></div>
+</section>
+
+<section class="panel hidden" id="studentPanel"><h2>Student profile</h2><div id="studentInfo"></div></section>
+</main>
+<script>
+let currentRole="student", scanner=null, lastRows=[];
+async function api(url, options={}) {
+  const r=await fetch(url,{...options,headers:{"Content-Type":"application/json",...(options.headers||{})}});
+  const data=await r.json().catch(()=>({error:"Server response error"}));
+  if(!r.ok) throw new Error(data.error||"Request failed");
+  return data;
+}
+function msg(id,text,ok=false){const e=document.getElementById(id);e.textContent=text;e.className=ok?"success":"error";}
+async function login(){
+ try{
+  const role=document.getElementById("role").value;
+  await api("/api/login",{method:"POST",body:JSON.stringify({role,password:document.getElementById("password").value})});
+  currentRole=role;document.getElementById("loginPanel").classList.add("hidden");
+  document.getElementById("staffPanel").classList.remove("hidden");
+  document.getElementById("welcome").textContent=role.toUpperCase()+" DASHBOARD";
+  document.getElementById("adminTools").classList.toggle("hidden",role!=="admin");
+  await loadReport();await loadStudents();
+ }catch(e){msg("loginMsg",e.message);}
+}
+async function logout(){await api("/api/logout",{method:"POST"});location.reload();}
+async function loadStudents(){
+ try{
+  const students=await api("/api/students");
+  const holder=document.getElementById("qrList");holder.innerHTML="";
+  for(const s of students){
+   const div=document.createElement("div");div.className="studentqr";
+   const canvas=document.createElement("canvas");div.appendChild(canvas);
+   const label=document.createElement("div");label.textContent=s.name+" · "+s.roll_no;div.appendChild(label);
+   const link=document.createElement("div");link.className="muted";link.textContent="QR profile";div.appendChild(link);
+   await QRCode.toCanvas(canvas,location.origin+"/?student="+s.qr_token,{width:150});
+   if(currentRole==="admin"){
+    const edit=document.createElement("button");edit.textContent="Edit";edit.onclick=()=>editStudent(s);div.appendChild(edit);
+    const del=document.createElement("button");del.textContent="Delete";del.className="danger";del.onclick=()=>deleteStudent(s.id);div.appendChild(del);
+   }
+   holder.appendChild(div);
+  }
+ }catch(e){console.error(e);}
+}
+async function addStudent(){
+ try{
+  await api("/api/students",{method:"POST",body:JSON.stringify({rollNo:roll.value,name:name.value,program:program.value,semester:semester.value})});
+  msg("studentMsg","Student added.",true);roll.value="";name.value="";await loadStudents();await loadReport();
+ }catch(e){msg("studentMsg",e.message);}
+}
+async function editStudent(s){
+ const rollNo=prompt("Roll number:",s.roll_no);if(rollNo===null)return;
+ const studentName=prompt("Student name:",s.name);if(studentName===null)return;
+ const programName=prompt("Program:",s.program);if(programName===null)return;
+ const sem=prompt("Semester:",s.semester);if(sem===null)return;
+ try{await api("/api/students/"+s.id,{method:"PUT",body:JSON.stringify({rollNo,name:studentName,program:programName,semester:sem})});await loadStudents();await loadReport();}
+ catch(e){alert(e.message);}
+}
+async function deleteStudent(id){if(!confirm("Delete this student and their attendance history?"))return;try{await api("/api/students/"+id,{method:"DELETE"});await loadStudents();await loadReport();}catch(e){alert(e.message);}}
+async function startScanner(){
+ if(!window.Html5Qrcode){msg("scanMsg","QR scanner library did not load. Check internet connection.");return;}
+ if(scanner){await stopScanner();}
+ scanner=new Html5Qrcode("reader");
+ try{
+  await scanner.start({facingMode:"environment"},{fps:10,qrbox:{width:240,height:240}},async decoded=>{
+   try{
+    const url=new URL(decoded);const token=url.searchParams.get("student")||decoded;
+    const result=await api("/api/attendance",{method:"POST",body:JSON.stringify({token,lecture:Number(lecture.value)})});
+    msg("scanMsg",result.message,true);await loadReport();
+   }catch(e){msg("scanMsg",e.message);}
+  },()=>{});
+ }catch(e){msg("scanMsg","Camera start failed: "+e);}
+}
+async function stopScanner(){if(scanner){try{await scanner.stop();await scanner.clear();}catch(e){}scanner=null;}}
+async function loadReport(){
+ try{
+  const date=document.getElementById("reportDate").value||undefined;
+  const q=date?"?date="+encodeURIComponent(date):"";
+  const data=await api("/api/report"+q);lastRows=data.rows;
+  document.getElementById("today").textContent=data.date+" (Pakistan time, 8 AM reset)";
+  document.getElementById("reportDate").value=data.date;
+  let html="<table><tr><th>Roll No</th><th>Name</th><th>Lecture 1</th><th>Lecture 2</th><th>Lecture 3</th><th>Lecture 4</th><th>Present</th></tr>";
+  for(const r of data.rows)html+=`<tr><td>${esc(r.roll_no)}</td><td>${esc(r.name)}</td><td>${r.lecture1||"-"}</td><td>${r.lecture2||"-"}</td><td>${r.lecture3||"-"}</td><td>${r.lecture4||"-"}</td><td>${r.present_count}/4</td></tr>`;
+  document.getElementById("report").innerHTML=html+"</table>";
+ }catch(e){console.error(e);}
+}
+async function loadHistory(){
+ try{const rows=await api("/api/history");let html="<table><tr><th>Date</th><th>Roll No</th><th>Name</th><th>Lecture</th><th>Status</th><th>Time</th></tr>";
+ for(const r of rows)html+=`<tr><td>${r.date}</td><td>${esc(r.roll_no)}</td><td>${esc(r.name)}</td><td>${r.lecture}</td><td>${r.status}</td><td>${r.marked_at}</td></tr>`;
+ document.getElementById("history").innerHTML=html+"</table>";}catch(e){alert(e.message);}
+}
+function downloadCSV(){
+ const header=["Roll No","Name","Lecture 1","Lecture 2","Lecture 3","Lecture 4","Present"];
+ const lines=[header,...lastRows.map(r=>[r.roll_no,r.name,r.lecture1,r.lecture2,r.lecture3,r.lecture4,r.present_count+"/4"])];
+ const csv=lines.map(row=>row.map(v=>'"'+String(v??"").replaceAll('"','""')+'"').join(",")).join("\n");
+ const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="attendance-report.csv";a.click();URL.revokeObjectURL(a.href);
+}
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+async function showStudent(token){
+ try{
+  const s=await api("/api/student/"+encodeURIComponent(token));
+  document.getElementById("loginPanel").classList.add("hidden");document.getElementById("studentPanel").classList.remove("hidden");
+  let rows=s.attendance.map(a=>`<tr><td>${a.lecture}</td><td>${a.status}</td><td>${a.marked_at}</td></tr>`).join("");
+  document.getElementById("studentInfo").innerHTML=`<h3>${esc(s.name)}</h3><p>Roll No: ${esc(s.roll_no)}</p><p>Program: ${esc(s.program)}</p><p>Semester: ${esc(s.semester)}</p><p>Date: ${s.attendanceDate}</p><table><tr><th>Lecture</th><th>Status</th><th>Marked at</th></tr>${rows}</table>`;
+ }catch(e){document.getElementById("studentPanel").classList.remove("hidden");document.getElementById("studentInfo").textContent=e.message;}
+}
+(async()=>{const token=new URLSearchParams(location.search).get("student");if(token){showStudent(token);return;}
+ try{const s=await api("/api/session");if(s.role==="admin"||s.role==="teacher"){currentRole=s.role;document.getElementById("loginPanel").classList.add("hidden");document.getElementById("staffPanel").classList.remove("hidden");document.getElementById("welcome").textContent=s.role.toUpperCase()+" DASHBOARD";document.getElementById("adminTools").classList.toggle("hidden",s.role!=="admin");await loadReport();await loadStudents();}}catch(e){}
+})();
+</script>
+</body></html>
